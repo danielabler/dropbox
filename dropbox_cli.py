@@ -34,6 +34,11 @@ parser.add_argument('--no', '-n', action='store_true',
                     help='Answer no to all questions')
 parser.add_argument('--default', '-d', action='store_true',
                     help='Take default answer on all questions')
+parser.add_argument('--overwrite_remote', '-f', default=False,
+                    help='Overwrite on DropBox')
+parser.add_argument('--mode', '-m', default='sync',
+                    help='Sync mode: sync, upload, download')
+
 
 def main():
     """Main program.
@@ -83,15 +88,14 @@ def main():
                 print('Skipping temporary file:', name)
             elif name.endswith('.pyc') or name.endswith('.pyo'):
                 print('Skipping generated file:', name)
-            elif nname in listing:
+            elif nname in listing and (args.mode=='sync' or args.mode=='download'):
                 md = listing[nname]
                 mtime = os.path.getmtime(fullname)
                 mtime_dt = datetime.datetime(*time.gmtime(mtime)[:6])
                 size = os.path.getsize(fullname)
-                if (isinstance(md, dropbox.files.FileMetadata) and
-                        mtime_dt == md.client_modified and size == md.size):
+                if (isinstance(md, dropbox.files.FileMetadata) and mtime_dt == md.client_modified and size == md.size):
                     print(name, 'is already synced [stats match]')
-                else:
+                elif mtime_dt == md.client_modified and size == md.size:
                     print(name, 'exists with different stats, downloading')
                     res = download(dbx, folder, subfolder, name)
                     with open(fullname) as f:
@@ -103,8 +107,8 @@ def main():
                         if yesno('Refresh %s' % name, False, args):
                             upload(dbx, fullname, folder, subfolder, name,
                                    overwrite=True)
-            elif yesno('Upload %s' % name, True, args):
-                upload(dbx, fullname, folder, subfolder, name)
+            elif yesno('Upload %s' % name, True, args) and (args.mode=='sync' or args.mode=='upload'):
+                upload(dbx, fullname, folder, subfolder, name, overwrite=args.overwrite_remote)
 
         # Then choose which subdirectories to traverse.
         keep = []
@@ -167,6 +171,8 @@ def upload(dbx, fullname, folder, subfolder, name, overwrite=False):
 
     Return the request response, or None in case of error.
     """
+    CHUNK_SIZE = 50 * 1024 * 1024
+
     path = '/%s/%s/%s' % (folder, subfolder.replace(os.path.sep, '/'), name)
     while '//' in path:
         path = path.replace('//', '/')
@@ -174,17 +180,38 @@ def upload(dbx, fullname, folder, subfolder, name, overwrite=False):
             if overwrite
             else dropbox.files.WriteMode.add)
     mtime = os.path.getmtime(fullname)
-    with open(fullname, 'rb') as f:
-        data = f.read()
-    with stopwatch('upload %d bytes' % len(data)):
-        try:
-            res = dbx.files_upload(
-                data, path, mode,
-                client_modified=datetime.datetime(*time.gmtime(mtime)[:6]),
-                mute=True)
-        except dropbox.exceptions.ApiError as err:
-            print('*** API error', err)
-            return None
+    file_size = os.path.getsize(fullname)
+    if file_size <= CHUNK_SIZE:
+        with open(fullname, 'rb') as f:
+            data = f.read()
+        with stopwatch("-- uploaded %.2f MB of '%s'"%(file_size/1028./1028., fullname  )):
+            try:
+                res = dbx.files_upload(
+                    data, path, mode,
+                    client_modified=datetime.datetime(*time.gmtime(mtime)[:6]),
+                    mute=True)
+            except dropbox.exceptions.ApiError as err:
+                print('*** API error', err)
+                return None
+    else:
+        with open(fullname, 'rb') as f:
+            upload_session_start_result = dbx.files_upload_session_start(f.read(CHUNK_SIZE))
+            cursor = dropbox.files.UploadSessionCursor(session_id=upload_session_start_result.session_id,
+                                                        offset=f.tell())
+            commit = dropbox.files.CommitInfo(path=path)
+
+            while f.tell() < file_size:
+                print("-- uploaded %.2f MB (%.2f MB) of '%s'"%(f.tell(), file_size/1028./1028., fullname  ) )
+                if ((file_size - f.tell()) <= CHUNK_SIZE):
+                    print
+                    res = dbx.files_upload_session_finish(f.read(CHUNK_SIZE),
+                                                            cursor,
+                                                            commit)
+                else:
+                    res = dbx.files_upload_session_append(f.read(CHUNK_SIZE),
+                                                    cursor.session_id,
+                                                    cursor.offset)
+                    cursor.offset = f.tell()
     print('uploaded as', res.name.encode('utf8'))
     return res
 
