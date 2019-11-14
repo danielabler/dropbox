@@ -171,7 +171,7 @@ def upload(dbx, fullname, folder, subfolder, name, overwrite=False):
 
     Return the request response, or None in case of error.
     """
-    CHUNK_SIZE = 50 * 1024 * 1024
+    CHUNK_SIZE = 250 * 1024 * 1024
 
     path = '/%s/%s/%s' % (folder, subfolder.replace(os.path.sep, '/'), name)
     while '//' in path:
@@ -201,7 +201,7 @@ def upload(dbx, fullname, folder, subfolder, name, overwrite=False):
             commit = dropbox.files.CommitInfo(path=path)
 
             while f.tell() < file_size:
-                print("-- uploaded %.2f MB (%.2f MB) of '%s'"%(f.tell(), file_size/1028./1028., fullname  ) )
+                print("-- uploaded %.2f MB (%.2f MB) of '%s'"%(f.tell()/1028./1028., file_size/1028./1028., fullname  ) )
                 if ((file_size - f.tell()) <= CHUNK_SIZE):
                     print
                     res = dbx.files_upload_session_finish(f.read(CHUNK_SIZE),
